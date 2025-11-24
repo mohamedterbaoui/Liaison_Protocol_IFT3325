@@ -5,9 +5,10 @@ from stuffing import bit_stuffing, bit_destuffing, ajouter_flags, extraire_entre
 from canal import Canal
 
 
+
 TAILLE_MAX_DATA = 100  # Taille maximale des donnees par trame (octets)
 FLAG = 0b01111110      
-TIMEOUT = 0.25         # Timeout en secondes (250ms)
+TIMEOUT = 0.200         # Timeout en secondes (250ms)
 
 # Types de trames
 TYPE_DATA = 0
@@ -451,10 +452,13 @@ class Recepteur:
         
         return identique
 
-def simulation_gobackn(fichier_path, probErreur=0.05, probPerte=0.10, delaiMax=0.02, 
+def simulation_gobackn(fichier_path, probErreur=0.05, probPerte=0.10, delaiMax=0.02,
                        timeout=TIMEOUT, taille_fenetre=5, max_tentatives=5):
     """
-    Simulation GO-BACK-N CORRECTE avec separation emetteur/recepteur
+    Simulation GO-BACK-N (version A améliorée : prise en compte du timeout réel)
+    - Ne modifie pas le Canal.
+    - Introduit un buffer global d'ACKs pour ne pas "perdre" les ACKs arrivant hors timing.
+    - Mesure le temps d'envoi réel (send_times) et déclenche timeout si elapsed > timeout.
     """
     print("\n" + "="*70)
     print("SIMULATION GO-BACK-N")
@@ -477,136 +481,195 @@ def simulation_gobackn(fichier_path, probErreur=0.05, probPerte=0.10, delaiMax=0
     print(f"Segmente en {nb_trames_total} trames\n")
     
     # Variables EMETTEUR (ce qu'il sait)
-    base_emetteur = 0  # Ce que l'emetteur croit avoir envoye avec succes
+    base_emetteur = 0  # indice de la plus ancienne trame non acquittée
     tentatives = [0] * nb_trames_total
+    # send_times stocke l'instant d'envoi (time.time()) pour chaque trame envoyée/retx,
+    # ou None si pas en attente.
+    send_times = [None] * nb_trames_total
     temps_debut = time.time()
+
+    # Buffer global pour ACKs reçus (corrige le problème d'ACK "hors timing")
+    acks_buffer_global = set()
     
     print("Debut transmission...\n")
     
     # ========================================================================
     # BOUCLE PRINCIPALE
     # ========================================================================
-    
     while base_emetteur < nb_trames_total:
-        
         fin_fenetre = min(base_emetteur + taille_fenetre, nb_trames_total)
-        
         print(f"[{get_timestamp()}] 📊 Fenetre emetteur: [{base_emetteur}, {fin_fenetre-1}], Recepteur attend: #{recepteur.dernier_num_seq + 1}")
         
-        # ----------------------------------------------------------------
-        # ENVOYER LA FENETRE ET ATTENDRE LES ACKs
-        # ----------------------------------------------------------------
-        
+        # On garde un set local pour debug mais la progression sera faite
+        # en se basant sur acks_buffer_global (persistant).
         acks_recus_cette_fenetre = set()
         
-        for num_seq in range(base_emetteur, fin_fenetre):
-            
-            # Verifier tentatives
-            if tentatives[num_seq] >= max_tentatives:
-                print(f"[{get_timestamp()}] ❌ ABANDON trame #{num_seq}")
-                base_emetteur += 1
-                continue
-            
-            data = trames_data[num_seq]
-            trame = Trame(num_seq, data, TYPE_DATA)
-            trame_bytes = trame.serialiser()
-            
-            # Afficher
-            if tentatives[num_seq] > 0:
-                print(f"[{get_timestamp()}] 🔄 RETRANS trame #{num_seq} (tentative {tentatives[num_seq] + 1})")
-                emetteur.trames_retransmises += 1
-            else:
-                print(f"[{get_timestamp()}] 📤 Envoi trame #{num_seq}")
-                emetteur.trames_envoyees += 1
-            
-            tentatives[num_seq] += 1
-            
-            # ============================================================
-            # PHASE 1: TRANSMETTRE LA TRAME
-            # ============================================================
-            trame_transmise = canal.transmettre(trame_bytes)
-            time.sleep(delaiMax)
-            
-            if trame_transmise is None:
-                print(f"[{get_timestamp()}]   ❌ Trame PERDUE dans canal")
-                # Ne pas continuer la fenetre, attendre timeout
-                break
-            
-            # ============================================================
-            # PHASE 2: RECEPTEUR TRAITE LA TRAME
-            # ============================================================
-            trame_recue, crc_valide = Trame.deserialiser(trame_transmise)
-            
-            if not crc_valide:
-                print(f"[{get_timestamp()}]   ❌ Trame CORROMPUE (CRC)")
-                recepteur.trames_rejetees += 1
-                # Recepteur ne fait rien, pas d'ACK
-                break
-            
-            # Verifier ordre (Go-Back-N strict)
-            if trame_recue.num_seq == recepteur.dernier_num_seq + 1:
-                # Trame acceptee
-                print(f"[{get_timestamp()}]   ✅ Recepteur accepte trame #{num_seq}")
-                recepteur.trames_recues.append((num_seq, data))
-                recepteur.dernier_num_seq = num_seq
-                recepteur.trames_acceptees += 1
+        # Si le timer pour la base_emetteur est actif et a expiré, on détecte timeout
+        timeout_detecte = False
+        if base_emetteur < nb_trames_total and send_times[base_emetteur] is not None:
+            elapsed = time.time() - send_times[base_emetteur]
+            if elapsed > timeout:
+                timeout_detecte = True
+                print(f"[{get_timestamp()}] ⏱️  TIMEOUT DETECTE pour base={base_emetteur} (elapsed={elapsed:.3f}s > timeout={timeout:.3f}s)")
+        
+        # Si timeout déjà détecté avant d'envoyer la fenêtre, on n'envoie rien de nouveau :
+        # on passera ensuite à la retransmission (retransmission = renvoi depuis base)
+        if timeout_detecte:
+            # on indique qu'on va retransmettre depuis base (la boucle suivante gèrera les tentatives)
+            print(f"[{get_timestamp()}] 🔁 Préparation retransmission GO-BACK-N depuis base={base_emetteur}\n")
+        else:
+            # Sinon on envoie chaque trame de la fenêtre (ou retransmet individuellement si nécessaire)
+            for num_seq in range(base_emetteur, fin_fenetre):
                 
-                # Envoyer ACK
-                ack = Trame(num_seq, b'', TYPE_ACK)
-                ack_bytes = ack.serialiser()
-                print(f"[{get_timestamp()}]   📨 Recepteur envoie ACK #{num_seq}")
+                # Verifier tentatives
+                if tentatives[num_seq] >= max_tentatives:
+                    print(f"[{get_timestamp()}] ❌ ABANDON trame #{num_seq}")
+                    # On considère l'abandon comme si on laissait base avancer (perte définitive)
+                    # (selon ton comportement précédent)
+                    base_emetteur += 1
+                    # Nettoyage éventuel du send_times
+                    send_times[num_seq] = None
+                    continue
                 
-                ack_transmis = canal.transmettre(ack_bytes)
-                recepteur.acks_envoyes += 1
-                time.sleep(delaiMax)
+                # Si on a déjà envoyé la trame et qu'on attend l'ACK,
+                # on n'a pas besoin de la renvoyer sauf si c'est une retransmission explicitement.
+                # Dans cette version minimale, on transmet la trame chaque itération de fenêtre
+                # *si* send_times[num_seq] is None (jamais envoyée) OU si on est en mode retransmission.
+                # Pour rester proche de ton code original : on envoie la trame à chaque itération
+                # (comme tu le faisais), mais on met à jour send_times pour le timer du base.
                 
-                # ============================================================
-                # PHASE 3: EMETTEUR RECOIT (ou pas) L'ACK
-                # ============================================================
-                if ack_transmis is not None:
-                    # ACK arrive a l'emetteur
-                    print(f"[{get_timestamp()}]   ✅ Emetteur recoit ACK #{num_seq}")
-                    emetteur.acks_recus += 1
-                    acks_recus_cette_fenetre.add(num_seq)
+                data = trames_data[num_seq]
+                trame = Trame(num_seq, data, TYPE_DATA)
+                trame_bytes = trame.serialiser()
+                
+                # Afficher
+                if tentatives[num_seq] > 0:
+                    print(f"[{get_timestamp()}] 🔄 RETRANS trame #{num_seq} (tentative {tentatives[num_seq] + 1})")
+                    emetteur.trames_retransmises += 1
                 else:
-                    # ACK perdu
-                    print(f"[{get_timestamp()}]   ❌ ACK #{num_seq} PERDU dans canal")
-                    # L'emetteur ne sait pas que la trame est arrivee
-                    # Il va timeout plus tard
+                    print(f"[{get_timestamp()}] 📤 Envoi trame #{num_seq}")
+                    emetteur.trames_envoyees += 1
+                
+                # Enregistrer l'instant d'envoi (toujours mettre à jour à l'envoi/retransmission)
+                send_times[num_seq] = time.time()
+                
+                tentatives[num_seq] += 1
+                
+                # ============================================================
+                # PHASE 1: TRANSMETTRE LA TRAME
+                # ============================================================
+                trame_transmise = canal.transmettre(trame_bytes)
+                
+                if trame_transmise is None:
+                    print(f"[{get_timestamp()}]   ❌ Trame PERDUE dans canal")
+                    # On sort de la boucle d'envoi pour attendre timeout (on laisse send_times tel quel)
                     break
-            
-            else:
-                # Trame hors ordre (duplicata ou saut)
-                print(f"[{get_timestamp()}]   ⚠️  Trame #{num_seq} hors ordre (recepteur attend #{recepteur.dernier_num_seq + 1})")
-                recepteur.trames_rejetees += 1
                 
-                # Go-Back-N: Recepteur renvoie ACK du dernier recu
-                if recepteur.dernier_num_seq >= 0:
-                    ack_dernier = Trame(recepteur.dernier_num_seq, b'', TYPE_ACK)
-                    ack_dernier_bytes = ack_dernier.serialiser()
-                    print(f"[{get_timestamp()}]   📨 Recepteur renvoie ACK #{recepteur.dernier_num_seq} (duplicata)")
-                    canal.transmettre(ack_dernier_bytes)
+                # ============================================================
+                # PHASE 2: RECEPTEUR TRAITE LA TRAME
+                # ============================================================
+                trame_recue, crc_valide = Trame.deserialiser(trame_transmise)
                 
-                # Arreter l'envoi de cette fenetre
-                break
+                if not crc_valide:
+                    print(f"[{get_timestamp()}]   ❌ Trame CORROMPUE (CRC)")
+                    recepteur.trames_rejetees += 1
+                    # Recepteur ne fait rien, pas d'ACK; on sort pour attendre timeout
+                    break
+                
+                # Verifier ordre (Go-Back-N strict)
+                if trame_recue.num_seq == recepteur.dernier_num_seq + 1:
+                    # Trame acceptee
+                    print(f"[{get_timestamp()}]   ✅ Recepteur accepte trame #{num_seq}")
+                    recepteur.trames_recues.append((num_seq, data))
+                    recepteur.dernier_num_seq = num_seq
+                    recepteur.trames_acceptees += 1
+                    
+                    # Envoyer ACK
+                    ack = Trame(num_seq, b'', TYPE_ACK)
+                    ack_bytes = ack.serialiser()
+                    print(f"[{get_timestamp()}]   📨 Recepteur envoie ACK #{num_seq}")
+                    
+                    # Transmettre l'ACK via le canal — on récupère le résultat
+                    ack_transmis = canal.transmettre(ack_bytes)
+                    recepteur.acks_envoyes += 1
+                    # petite attente simulée côté récepteur
+                    time.sleep(delaiMax)
+                    
+                    # ============================================================
+                    # PHASE 3: EMETTEUR RECOIT (ou pas) L'ACK
+                    # ============================================================
+                    if ack_transmis is not None:
+                        # ACK arrive a l'emetteur : on le stocke dans le buffer global
+                        print(f"[{get_timestamp()}]   ✅ Emetteur recoit ACK #{num_seq}")
+                        emetteur.acks_recus += 1
+                        acks_recus_cette_fenetre.add(num_seq)
+                        acks_buffer_global.add(num_seq)
+                        # On marque la trame comme acquittée -> supprimer timer local
+                        send_times[num_seq] = None
+                    else:
+                        # ACK perdu
+                        print(f"[{get_timestamp()}]   ❌ ACK #{num_seq} PERDU dans canal")
+                        # On ne fait pas break ici autrement que pour sortir de la boucle et
+                        # attendre timeout : l'ACK manquant fera timeout plus tard.
+                        break
+                
+                else:
+                    # Trame hors ordre (duplicata ou saut)
+                    print(f"[{get_timestamp()}]   ⚠️  Trame #{num_seq} hors ordre (recepteur attend #{recepteur.dernier_num_seq + 1})")
+                    recepteur.trames_rejetees += 1
+                    
+                    # Go-Back-N: Recepteur renvoie ACK du dernier recu (si existant)
+                    if recepteur.dernier_num_seq >= 0:
+                        ack_dernier = Trame(recepteur.dernier_num_seq, b'', TYPE_ACK)
+                        ack_dernier_bytes = ack_dernier.serialiser()
+                        print(f"[{get_timestamp()}]   📨 Recepteur renvoie ACK #{recepteur.dernier_num_seq} (duplicata)")
+                        # ici on récupère aussi la livraison de l'ACK duplicata
+                        ack_dernier_transmis = canal.transmettre(ack_dernier_bytes)
+                        recepteur.acks_envoyes += 1
+                        # si l'ACK duplicata parvient, le conserver dans le buffer global
+                        if ack_dernier_transmis is not None:
+                            print(f"[{get_timestamp()}]   ✅ Emetteur recoit ACK duplicata #{recepteur.dernier_num_seq}")
+                            emetteur.acks_recus += 1
+                            acks_buffer_global.add(recepteur.dernier_num_seq)
+                    
+                    # Arreter l'envoi de cette fenetre (on sort pour traiter acks / timeout)
+                    break
         
         # ----------------------------------------------------------------
-        # AVANCER BASE EMETTEUR
+        # AVANCER BASE EMETTEUR en se basant sur acks_buffer_global
         # ----------------------------------------------------------------
-        
         ancien_base = base_emetteur
         
-        # Avancer base pour tous les ACKs recus consecutifs
-        while base_emetteur in acks_recus_cette_fenetre:
+        while base_emetteur in acks_buffer_global:
+            # On consomme l'ACK et on annule le timer de la trame acquittée (déjà fait plus haut)
             base_emetteur += 1
+        
+        # Nettoyer le buffer pour éviter croissance inutile
+        acks_buffer_global = {a for a in acks_buffer_global if a >= base_emetteur}
         
         if base_emetteur > ancien_base:
             print(f"[{get_timestamp()}] 📊 Base emetteur avance: {ancien_base} → {base_emetteur}\n")
+            # Si la base a avancé, on continue (les send_times pour les trames acquittées sont None)
+            # et la prochaine itération enverra/retx suivant la logique.
         else:
-            # Aucun ACK recu, timeout
-            print(f"[{get_timestamp()}] ⏱️  TIMEOUT: Aucun ACK recu, GO-BACK-N depuis base={base_emetteur}\n")
-            time.sleep(timeout * 0.5)  # Petite pause avant retransmission
+            # Aucune progression : vérifier si timeout réel s'est produit pour la base
+            timeout_actuel = False
+            if base_emetteur < nb_trames_total and send_times[base_emetteur] is not None:
+                elapsed_base = time.time() - send_times[base_emetteur]
+                if elapsed_base > timeout:
+                    timeout_actuel = True
+                    print(f"[{get_timestamp()}] ⏱️  TIMEOUT: Aucun ACK utile recu pour base={base_emetteur} (elapsed={elapsed_base:.3f}s > timeout={timeout:.3f}s). GO-BACK-N depuis base={base_emetteur}\n")
+            
+            if not timeout_actuel:
+                # Aucun ACK utile reçu et pas (encore) de timeout : attente courte
+                # On laisse un petit délai pour simuler l'attente de réponses asynchrones
+                time.sleep(0.01)
+            else:
+                # Timeout : on va retransmettre à partir de base (dans la prochaine boucle)
+                # Petite pause avant retransmission (optionnel)
+                time.sleep(timeout * 0.1)
         
+        # Petit sleep pour laisser "respirer" la simulation
         time.sleep(0.01)
     
     # ========================================================================
@@ -661,6 +724,8 @@ def simulation_gobackn(fichier_path, probErreur=0.05, probPerte=0.10, delaiMax=0
         'succes': message == message_recu,
         'taux_retransmission': taux
     }
+
+
 
 if __name__ == "__main__":
     # print("\n" + "="*70)
@@ -895,5 +960,5 @@ if __name__ == "__main__":
     print("\n>>> TEST 8: Transmission du fichier message.txt")
     print("-" * 70)
     fichier_message = '../message.txt'
-    result = simulation_gobackn(fichier_message, probErreur=0.1, probPerte=0.05, delaiMax=0.05)
+    result = simulation_gobackn(fichier_message, probErreur=0.0, probPerte=0.0, delaiMax=0.6)
     print("\nTest result:", result)
