@@ -960,5 +960,5 @@ if __name__ == "__main__":
     print("\n>>> TEST 8: Transmission du fichier message.txt")
     print("-" * 70)
     fichier_message = '../message.txt'
-    result = simulation_gobackn(fichier_message, probErreur=0.0, probPerte=0.0, delaiMax=0.6)
+    result = simulation_gobackn(fichier_message, probErreur=0.0, probPerte=0.0, delaiMax=0.2)
     print("\nTest result:", result)
