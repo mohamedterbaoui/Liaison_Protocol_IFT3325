@@ -492,7 +492,80 @@ def simulation_gobackn(fichier_path, probErreur=0.05, probPerte=0.10, delaiMax=0
     acks_buffer_global = set()
     
     print("Debut transmission...\n")
-    
+
+    # Retransmettre toutes les trames de la fenêtre à partir de base
+    def retransmettre_depuis_base():
+        print(f"[{get_timestamp()}] 🔁 GO-BACK-N: Retransmission depuis base={base_emetteur} jusqu'à {fin_fenetre - 1}")
+        for num_seq in range(base_emetteur, fin_fenetre):
+            data = trames_data[num_seq]
+            trame = Trame(num_seq, data, TYPE_DATA)
+            trame_bytes = trame.serialiser()
+
+            print(f"[{get_timestamp()}] 🔄 RETRANS trame #{num_seq}")
+            emetteur.trames_retransmises += 1
+            tentatives[num_seq] += 1
+            send_times[num_seq] = time.time()
+
+            # Transmettre la trame
+            trame_transmise = canal.transmettre(trame_bytes)
+            if trame_transmise is None:
+                print(f"[{get_timestamp()}]   ❌ Trame PERDUE dans canal (retransmission)")
+                # on continue à tenter les suivantes; le timeout re-déclenchera si nécessaire
+                continue
+
+            # Réception côté récepteur
+            trame_recue, crc_valide = Trame.deserialiser(trame_transmise)
+            if not crc_valide:
+                print(f"[{get_timestamp()}]   ❌ Trame CORROMPUE (CRC) en retransmission")
+                recepteur.trames_rejetees += 1
+                continue
+
+            # Ordonnancement Go-Back-N
+            if trame_recue.num_seq == recepteur.dernier_num_seq + 1:
+                print(f"[{get_timestamp()}]   ✅ Recepteur accepte trame #{num_seq} (retransmission)")
+                recepteur.trames_recues.append((num_seq, data))
+                recepteur.dernier_num_seq = num_seq
+                recepteur.trames_acceptees += 1
+
+                # Envoyer ACK
+                ack = Trame(num_seq, b'', TYPE_ACK)
+                ack_bytes = ack.serialiser()
+                print(f"[{get_timestamp()}]   📨 Recepteur envoie ACK #{num_seq} (retransmission)")
+                ack_transmis = canal.transmettre(ack_bytes)
+                recepteur.acks_envoyes += 1
+                time.sleep(delaiMax)
+
+                if ack_transmis is not None:
+                    print(f"[{get_timestamp()}]   ✅ Emetteur recoit ACK #{num_seq}")
+                    emetteur.acks_recus += 1
+                    # ACK cumulatif: on marque toutes les trames <= num_seq comme acquittées
+                    for k in range(base_emetteur, num_seq + 1):
+                        acks_recus_cette_fenetre.add(k)
+                        acks_buffer_global.add(k)
+                        send_times[k] = None
+                else:
+                    print(f"[{get_timestamp()}]   ❌ ACK #{num_seq} PERDU dans canal")
+                    break
+            else:
+                # Duplicata/hors ordre → ACK du dernier reçu (utile pour débloquer la base)
+                print(
+                    f"[{get_timestamp()}]   ⚠️  Trame #{num_seq} hors ordre (retransmission), recepteur attend #{recepteur.dernier_num_seq + 1}")
+                recepteur.trames_rejetees += 1
+                if recepteur.dernier_num_seq >= 0:
+                    ack_dernier = Trame(recepteur.dernier_num_seq, b'', TYPE_ACK)
+                    ack_dernier_bytes = ack_dernier.serialiser()
+                    print(f"[{get_timestamp()}]   📨 Recepteur renvoie ACK duplicata #{recepteur.dernier_num_seq}")
+                    ack_dernier_transmis = canal.transmettre(ack_dernier_bytes)
+                    recepteur.acks_envoyes += 1
+                    if ack_dernier_transmis is not None:
+                        dernier = recepteur.dernier_num_seq
+                        print(f"[{get_timestamp()}]   ✅ Emetteur recoit ACK duplicata #{dernier}")
+                        emetteur.acks_recus += 1
+                        # ACK cumulatif: tout jusqu'à 'dernier' est considéré acquitté
+                        for k in range(base_emetteur, dernier + 1):
+                            acks_buffer_global.add(k)
+                            send_times[k] = None
+
     # ========================================================================
     # BOUCLE PRINCIPALE
     # ========================================================================
@@ -515,6 +588,7 @@ def simulation_gobackn(fichier_path, probErreur=0.05, probPerte=0.10, delaiMax=0
         # Si timeout déjà détecté avant d'envoyer la fenêtre, on n'envoie rien de nouveau :
         # on passera ensuite à la retransmission (retransmission = renvoi depuis base)
         if timeout_detecte:
+            retransmettre_depuis_base()
             # on indique qu'on va retransmettre depuis base (la boucle suivante gèrera les tentatives)
             print(f"[{get_timestamp()}] 🔁 Préparation retransmission GO-BACK-N depuis base={base_emetteur}\n")
         else:
@@ -602,10 +676,11 @@ def simulation_gobackn(fichier_path, probErreur=0.05, probPerte=0.10, delaiMax=0
                         # ACK arrive a l'emetteur : on le stocke dans le buffer global
                         print(f"[{get_timestamp()}]   ✅ Emetteur recoit ACK #{num_seq}")
                         emetteur.acks_recus += 1
-                        acks_recus_cette_fenetre.add(num_seq)
-                        acks_buffer_global.add(num_seq)
-                        # On marque la trame comme acquittée -> supprimer timer local
-                        send_times[num_seq] = None
+                        for k in range(base_emetteur, num_seq + 1):
+                            acks_recus_cette_fenetre.add(k)
+                            acks_buffer_global.add(k)
+                            send_times[k] = None
+
                     else:
                         # ACK perdu
                         print(f"[{get_timestamp()}]   ❌ ACK #{num_seq} PERDU dans canal")
@@ -628,9 +703,13 @@ def simulation_gobackn(fichier_path, probErreur=0.05, probPerte=0.10, delaiMax=0
                         recepteur.acks_envoyes += 1
                         # si l'ACK duplicata parvient, le conserver dans le buffer global
                         if ack_dernier_transmis is not None:
-                            print(f"[{get_timestamp()}]   ✅ Emetteur recoit ACK duplicata #{recepteur.dernier_num_seq}")
+                            dernier = recepteur.dernier_num_seq
+                            print(f"[{get_timestamp()}]   ✅ Emetteur recoit ACK duplicata #{dernier}")
                             emetteur.acks_recus += 1
-                            acks_buffer_global.add(recepteur.dernier_num_seq)
+                            # ACK cumulatif: tout jusqu'à 'dernier' est considéré acquitté
+                            for k in range(base_emetteur, dernier + 1):
+                                acks_buffer_global.add(k)
+                                send_times[k] = None
                     
                     # Arreter l'envoi de cette fenetre (on sort pour traiter acks / timeout)
                     break
@@ -665,8 +744,9 @@ def simulation_gobackn(fichier_path, probErreur=0.05, probPerte=0.10, delaiMax=0
                 # On laisse un petit délai pour simuler l'attente de réponses asynchrones
                 time.sleep(0.01)
             else:
-                # Timeout : on va retransmettre à partir de base (dans la prochaine boucle)
-                # Petite pause avant retransmission (optionnel)
+                # Timeout détecté → retransmission immédiate depuis la base
+                retransmettre_depuis_base()
+                # Petite pause pour éviter le busy-wait
                 time.sleep(timeout * 0.1)
         
         # Petit sleep pour laisser "respirer" la simulation
@@ -957,8 +1037,30 @@ if __name__ == "__main__":
     #     print("✗ ERREUR: Message incorrect")
 
     # --- Test: transmit message.txt from repo root ---
-    print("\n>>> TEST 8: Transmission du fichier message.txt")
+    # print("\n>>> TEST 8: Transmission du fichier message.txt")
+    # print("-" * 70)
+    # fichier_message = '../message.txt'
+    # result = simulation_gobackn(fichier_message, probErreur=0.0, probPerte=0.0, delaiMax=0.2)
+    # print("\nTest result:", result)
+
+    # ========================================================================
+    # TEST 9: Influence du délai sur les temporisations
+    # ========================================================================
+    print("\n>>> TEST 9: Influence du délai sur les temporisations")
     print("-" * 70)
     fichier_message = '../message.txt'
-    result = simulation_gobackn(fichier_message, probErreur=0.0, probPerte=0.0, delaiMax=0.2)
-    print("\nTest result:", result)
+
+    # Cas 1 : delaiMax = 50 ms (< timeout)
+    print("\nCas 1: delaiMax = 0.050 s (< timeout, aucune retransmission attendue)")
+    simulation_gobackn(fichier_message, probErreur=0.05, probPerte=0.10,
+                       delaiMax=0.050, timeout=0.200)
+
+    # Cas 2 : delaiMax = 180 ms (≈ timeout)
+    print("\nCas 2: delaiMax = 0.180 s (≈ timeout, quelques faux timeouts attendus)")
+    simulation_gobackn(fichier_message, probErreur=0.05, probPerte=0.10,
+                       delaiMax=0.180, timeout=0.200)
+
+    # Cas 3 : delaiMax = 300 ms (> timeout)
+    print("\nCas 3: delaiMax = 0.300 s (> timeout, nombreuses retransmissions attendues)")
+    simulation_gobackn(fichier_message, probErreur=0.05, probPerte=0.10,
+                       delaiMax=0.300, timeout=0.200)
