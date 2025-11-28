@@ -770,12 +770,12 @@ if __name__ == "__main__":
     simulation_gobackn(fichier_message, probErreur=0.05, probPerte=0.10,
                        delaiMax=0.050, timeout=0.200)
 
-    # Cas 2 : delaiMax = 180 ms (≈ timeout)
-    print("\nCas 2: delaiMax = 0.180 s (≈ timeout, quelques faux timeouts attendus)")
-    simulation_gobackn(fichier_message, probErreur=0.05, probPerte=0.10,
-                       delaiMax=0.180, timeout=0.200)
+    # # Cas 2 : delaiMax = 180 ms (≈ timeout)
+    # print("\nCas 2: delaiMax = 0.180 s (≈ timeout, quelques faux timeouts attendus)")
+    # simulation_gobackn(fichier_message, probErreur=0.05, probPerte=0.10,
+    #                    delaiMax=0.180, timeout=0.200)
 
-    # Cas 3 : delaiMax = 300 ms (> timeout)
-    print("\nCas 3: delaiMax = 0.300 s (> timeout, nombreuses retransmissions attendues)")
-    simulation_gobackn(fichier_message, probErreur=0.05, probPerte=0.10,
-                       delaiMax=0.300, timeout=0.200)
+    # # Cas 3 : delaiMax = 300 ms (> timeout)
+    # print("\nCas 3: delaiMax = 0.300 s (> timeout, nombreuses retransmissions attendues)")
+    # simulation_gobackn(fichier_message, probErreur=0.05, probPerte=0.10,
+    #                    delaiMax=0.300, timeout=0.200)
