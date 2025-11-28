@@ -108,6 +108,20 @@ def extraire_entre_flags(trame_bits):
     
     return donnees
 
+def bits_to_bytes(bits_str):
+    # Convertit un string de bits en bytes
+    # Padding si nécessaire pour avoir un multiple de 8
+    if len(bits_str) % 8 != 0:
+        bits_str = bits_str + '0' * (8 - len(bits_str) % 8)
+    
+    # Convertir par blocs de 8 bits
+    result = bytearray()
+    for i in range(0, len(bits_str), 8):
+        byte_str = bits_str[i:i+8]
+        result.append(int(byte_str, 2))
+    
+    return bytes(result)
+
 
 # Programme principal
 if __name__ == "__main__":    

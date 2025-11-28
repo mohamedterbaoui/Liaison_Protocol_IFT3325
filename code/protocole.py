@@ -1,7 +1,7 @@
 import time
 import struct
 from datetime import datetime
-from stuffing import bit_stuffing, bit_destuffing, ajouter_flags, extraire_entre_flags
+from stuffing import bit_stuffing, bit_destuffing, ajouter_flags, bits_to_bytes, extraire_entre_flags
 from canal import Canal
 
 
@@ -52,34 +52,35 @@ class Trame:
     
     
     def serialiser(self):
-        # Convertit la trame en bytes (prete a etre transmise)
-
+        # (1) Construire la trame classique (sans stuffing)
         # Determiner le type
         type_byte = 0 if self.type_trame == TYPE_DATA else 1
-        
+
         # Longueur des donnees
         data_len = len(self.data) if self.data else 0
-        
+
         # Construire l'en-tete: num_seq (1B) + type (1B) + longueur (2B)
-        # '!' = network byte order (big-endian)
-        # 'B' = unsigned char (1 octet)
-        # 'H' = unsigned short (2 octets)
         header = struct.pack('!BBH', self.num_seq, type_byte, data_len)
-        
+
         # Corps = en-tete + donnees
-        if self.data:
-            corps = header + self.data
-        else:
-            corps = header
-        
-        # Calculer le CRC sur le corps (en-tete + donnees)
+        corps = header + (self.data if self.data else b'')
+
+        # Calculer le CRC sur le corps
         crc = calculer_crc16(corps)
-        
-        # Trame complete = corps + crc
-        # 'H' = unsigned short (2 octets) pour le CRC
+
+        # Trame complete = corps + crc (SANS FLAGS)
         trame_bytes = corps + struct.pack('!H', crc)
-        
-        return trame_bytes
+
+        # (2) Convertir en bits
+        bits = ''.join(f"{byte:08b}" for byte in trame_bytes)
+
+        # (3) Bit stuffing
+        bits_stuffed = bit_stuffing(bits)
+
+        # (4) Ajouter les flags HDLC
+        bits_flagged = ajouter_flags(bits_stuffed)
+
+        return bits_to_bytes(bits_flagged)  # renvoyer en bytes pour le canal
     
     
     @staticmethod
@@ -88,39 +89,57 @@ class Trame:
         # Args:trame_bytes: bytes recus
         # Returns:(Trame, crc_valide) ou (None, False) si erreur
 
-        # Verifier la taille minimale: header(4) + crc(2) = 6 octets
-        if len(trame_bytes) < 6:
+        # === RETIRER LE BIT-STUFFING HDLC ===
+        # Convertir bytes → string de bits
+        bits_str = ''.join(f"{byte:08b}" for byte in trame_bytes)
+
+        # (1) Extraire entre flags
+        bits_no_flags = extraire_entre_flags(bits_str)
+        if bits_no_flags is None:
             return None, False
+
+        # (2) Destuffing
+        bits_clean = bit_destuffing(bits_no_flags)
+
+        # (3) Retour aux bytes
+        if len(bits_clean) % 8 != 0:
+            return None, False
+
+        data_bytes = bytes(int(bits_clean[i:i+8], 2)
+                        for i in range(0, len(bits_clean), 8))
         
+        # === DESERIALISATION NORMALE ===
+        # (4) Analyse normale de trame
+        # Verifier la taille minimale: header(4) + crc(2) = 6 octets
+        if len(data_bytes) < 6:
+            return None, False
+
         # Extraire l'en-tete (4 premiers octets)
-        num_seq, type_byte, data_len = struct.unpack('!BBH', trame_bytes[:4])
-        
+        num_seq, type_byte, data_len = struct.unpack('!BBH', data_bytes[:4])
+
         # Verifier que la taille est coherente
-        taille_attendue = 4 + data_len + 2  # header + data + crc
-        if len(trame_bytes) < taille_attendue:
+        # header + data + crc
+        taille_attendue = 4 + data_len + 2
+        if len(data_bytes) < taille_attendue:
             return None, False
         
         # Extraire les donnees (si presentes)
-        if data_len > 0:
-            data = trame_bytes[4:4+data_len]
-        else:
-            data = b''
-        
+        data = data_bytes[4:4+data_len]
+
         # Extraire le CRC (2 derniers octets de la partie attendue)
-        crc_recu = struct.unpack('!H', trame_bytes[4+data_len:4+data_len+2])[0]
-        
+        crc_recu = struct.unpack('!H', data_bytes[4+data_len:4+data_len+2])[0]
+
         # Calculer le CRC sur la trame complete (corps + crc recu)
-        # Si aucune erreur, le reste de la division doit etre 0
-        trame_complete = trame_bytes[:4+data_len+2]
+        trame_complete = data_bytes[:4+data_len+2]
         reste = calculer_crc16(trame_complete)
-        
+
         # Verifier si le reste est 0
         crc_valide = (reste == 0)
-        
+
         # Reconstruire la trame
         type_trame = TYPE_DATA if type_byte == 0 else TYPE_ACK
         trame = Trame(num_seq, data, type_trame)
-        
+
         return trame, crc_valide
     
 class Emetteur:
@@ -542,6 +561,8 @@ def simulation_gobackn(fichier_path, probErreur=0.05, probPerte=0.10, delaiMax=0
 
 
 if __name__ == "__main__":
+    # Commenter/Decommenter pour un test spécifique
+
     # print("\n" + "="*70)
     # print(" TESTS UNITAIRES - PROTOCOLE DE LIAISON")
     # print("="*70)
