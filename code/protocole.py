@@ -7,18 +7,15 @@ from canal import Canal
 
 
 TAILLE_MAX_DATA = 100  # Taille maximale des donnees par trame (octets)
-FLAG = 0b01111110      
-TIMEOUT = 0.200         # Timeout en secondes (250ms)
+TIMEOUT = 0.250         # Timeout en secondes (250ms)
 
 # Types de trames
 TYPE_DATA = 0
 TYPE_ACK = 1
 
 def calculer_crc16(data):
-    """
-    Calcule le CRC-16 CCITT (polynome 0x1021)
-    Methode compatible avec verification 'reste = 0'
-    """
+    # Calcule le CRC-16 CCITT (polynome 0x1021)
+    # Utilisation de la methode de verification 'reste = 0'
     crc = 0xFFFF  # Initialisation
     
     for byte in data:
@@ -46,6 +43,7 @@ def get_timestamp():
 class Trame:
     # Represente une trame de donnees ou un ACK
     # Format: [num_seq(1B)] [type(1B)] [longueur(2B)] [donnees(0-100B)] [crc(2B)]
+    # Justification dans le rapport
 
     def __init__(self, num_seq, data, type_trame=TYPE_DATA):
         self.num_seq = num_seq
@@ -143,15 +141,9 @@ class Emetteur:
         self.acks_recus = 0
 
     def _segmenter(self, message):
-        """
-        Segmente le message en chunks de TAILLE_MAX_DATA octets
-        
-        Args:
-            message: bytes du message complet
-        
-        Returns:
-            liste de bytes (chaque element = 1 trame de donnees)
-        """
+        # Segmente le message en chunks de TAILLE_MAX_DATA octets
+        # retourne liste de bytes (chaque element = 1 trame de donnees)
+ 
         chunks = []
         
         # Parcourir le message par blocs de TAILLE_MAX_DATA
@@ -162,166 +154,14 @@ class Emetteur:
         
         return chunks
     
-    def _envoyer_trame(self, num_seq, data, retransmission=False):
-        """
-        Envoie UNE trame de donnees via le canal
-        
-        Args:
-            num_seq: numero de sequence
-            data: bytes de donnees
-            retransmission: True si c'est une retransmission
-        
-        Returns:
-            bytes de la trame transmise (ou None si perdue)
-        """
-        # Creer la trame
-        trame = Trame(num_seq, data, TYPE_DATA)
-        trame_bytes = trame.serialiser()
-        
-        # Afficher l'evenement
-        if retransmission:
-            print(f"[{get_timestamp()}] RETRANSMISSION trame #{num_seq} ({len(data)} octets)")
-            self.trames_retransmises += 1
-        else:
-            print(f"[{get_timestamp()}] Envoi trame #{num_seq} ({len(data)} octets)")
-            self.trames_envoyees += 1
-        
-        # Stocker dans le buffer pour retransmission eventuelle
-        self.buffer_trames[num_seq] = data
-        
-        # Enregistrer le temps d'envoi
-        self.temps_envoi[num_seq] = time.time()
-        
-        # Transmettre via le canal
-        trame_transmise = self.canal.transmettre(trame_bytes)
-        
-        return trame_transmise
-    
-    def envoyer_message_gobackn(self, fichier_path):
-        """
-        Envoie un fichier complet avec Go-Back-N et fenetre glissante
-        
-        Args:
-            fichier_path: chemin du fichier a transmettre
-        
-        Returns:
-            dictionnaire avec statistiques
-        """
-        print(f"\n{'='*60}")
-        print(f"TRANSMISSION AVEC GO-BACK-N")
-        print(f"Fichier: {fichier_path}")
-        print(f"Fenetre: {self.taille_fenetre} trames")
-        print(f"Timeout: {self.timeout*1000}ms")
-        print(f"{'='*60}\n")
-        
-        # Lire le fichier
-        with open(fichier_path, 'rb') as f:
-            message = f.read()
-        
-        print(f"Taille du fichier: {len(message)} octets")
-        
-        # Segmenter en trames
-        trames_data = self._segmenter(message)
-        nb_trames_total = len(trames_data)
-        print(f"Segmente en {nb_trames_total} trames\n")
-        
-        # Reinitialiser les variables
-        self.base = 0
-        self.next_seq = 0
-        self.buffer_trames = {}
-        self.temps_envoi = {}
-        
-        temps_debut = time.time()
-        
-        # ========================================================================
-        # BOUCLE PRINCIPALE GO-BACK-N
-        # ========================================================================
-        
-        while self.base < nb_trames_total:
-            
-            # 1. ENVOYER les trames dans la fenetre
-            while self.next_seq < self.base + self.taille_fenetre and self.next_seq < nb_trames_total:
-                data = trames_data[self.next_seq]
-                self._envoyer_trame(self.next_seq, data, retransmission=False)
-                self.next_seq += 1
-                
-                # Petit delai pour ne pas saturer
-                time.sleep(0.01)
-            
-            # 2. ATTENDRE un peu pour recevoir des ACKs
-            time.sleep(0.05)
-            
-            # 3. VERIFIER les timeouts
-            trame_timeout = self._verifier_timeouts()
-            
-            if trame_timeout is not None:
-                # TIMEOUT detecte ! Go-Back-N : retransmettre depuis base
-                print(f"\n{'='*60}")
-                print(f"GO-BACK-N : Retransmission depuis trame #{self.base}")
-                print(f"{'='*60}\n")
-                
-                # Retransmettre toutes les trames de [base à next_seq-1]
-                for num_seq in range(self.base, self.next_seq):
-                    if num_seq in self.buffer_trames:
-                        data = self.buffer_trames[num_seq]
-                        self._envoyer_trame(num_seq, data, retransmission=True)
-                        time.sleep(0.01)
-            
-            # Petit delai avant la prochaine iteration
-            time.sleep(0.05)
-        
-        # ========================================================================
-        # FIN DE LA TRANSMISSION
-        # ========================================================================
-        
-        duree = time.time() - temps_debut
-        
-        print(f"\n{'='*60}")
-        print("Transmission terminee.")
-        print(f"Frames envoyees : {self.trames_envoyees}")
-        print(f"Frames retransmises : {self.trames_retransmises}")
-        print(f"ACK recus : {self.acks_recus}")
-        print(f"Duree totale : {duree:.2f} s")
-        print(f"{'='*60}\n")
-        
-        return {
-            'envoyees': self.trames_envoyees,
-            'retransmises': self.trames_retransmises,
-            'acks': self.acks_recus,
-            'duree': duree
-        }
-    
-    def _verifier_timeouts(self):
-        """
-        Verifie si des trames ont timeout
-        Retourne le numero de la premiere trame en timeout, ou None
-        """
-        temps_actuel = time.time()
-        
-        # Verifier toutes les trames dans la fenetre
-        for num_seq in range(self.base, self.next_seq):
-            if num_seq in self.temps_envoi:
-                temps_ecoule = temps_actuel - self.temps_envoi[num_seq]
-                
-                if temps_ecoule > self.timeout:
-                    print(f"[{get_timestamp()}] ⏱️  TIMEOUT trame #{num_seq}")
-                    return num_seq
-        
-        return None
     
 class Recepteur:
-    """
-    Recepteur de trames
-    Verifie le CRC, envoie les ACKs, recompose le message
-    """
+    # Recepteur de trames
+    # Verifie le CRC, envoie les ACKs, recompose le message
     
     def __init__(self, canal):
-        """
-        Constructeur du recepteur
-        
-        Args:
-            canal: objet Canal pour transmettre les ACKs
-        """
+        # Constructeur du recepteur
+
         self.canal = canal
         
         # Liste pour stocker les trames recues: (num_seq, data)
@@ -335,82 +175,9 @@ class Recepteur:
         self.trames_rejetees = 0
         self.acks_envoyes = 0
     
-    
-    def recevoir_trame(self, trame_bytes):
-        """
-        Recoit et traite UNE trame
-        
-        Args:
-            trame_bytes: bytes de la trame recue
-        
-        Returns:
-            True si trame acceptee, False sinon
-        """
-        # Si la trame est None (perdue dans le canal), ignorer
-        if trame_bytes is None:
-            print(f"[{get_timestamp()}] Trame perdue (None)")
-            return False
-        
-        # Deserialiser la trame
-        trame, crc_valide = Trame.deserialiser(trame_bytes)
-        
-        # Si la trame est invalide ou CRC incorrect
-        if trame is None or not crc_valide:
-            print(f"[{get_timestamp()}] Trame corrompue - CRC ERREUR")
-            self.trames_rejetees = self.trames_rejetees + 1
-            return False
-        
-        # Afficher reception
-        print(f"[{get_timestamp()}] Reception trame #{trame.num_seq} - CRC OK")
-        
-        # Go-Back-N: accepter seulement si num_seq = dernier + 1
-        if trame.num_seq == self.dernier_num_seq + 1:
-            # Trame attendue, accepter
-            self.trames_recues.append((trame.num_seq, trame.data))
-            self.dernier_num_seq = trame.num_seq
-            self.trames_acceptees = self.trames_acceptees + 1
-            
-            # Envoyer ACK
-            self._envoyer_ack(trame.num_seq)
-            
-            return True
-        else:
-            # Trame hors ordre (duplicata ou saut), rejeter
-            print(f"[{get_timestamp()}] Trame #{trame.num_seq} hors ordre (attendu #{self.dernier_num_seq + 1})")
-            self.trames_rejetees = self.trames_rejetees + 1
-            
-            # Renvoyer ACK du dernier accepte (Go-Back-N)
-            if self.dernier_num_seq >= 0:
-                self._envoyer_ack(self.dernier_num_seq)
-            
-            return False
-    
-    
-    def _envoyer_ack(self, num_seq):
-        """
-        Envoie un ACK pour une trame
-        
-        Args:
-            num_seq: numero de sequence a accuser
-        """
-        # Creer un ACK (trame sans donnees)
-        ack = Trame(num_seq, b'', TYPE_ACK)
-        ack_bytes = ack.serialiser()
-        
-        print(f"[{get_timestamp()}] Envoi ACK #{num_seq}")
-        
-        # Transmettre l'ACK via le canal
-        self.canal.transmettre(ack_bytes)
-        self.acks_envoyes = self.acks_envoyes + 1
-    
-    
     def recomposer_message(self):
-        """
-        Recompose le message complet a partir des trames recues
-        
-        Returns:
-            bytes du message original
-        """
+        # Recompose le message complet a partir des trames recues
+
         # Trier par numero de sequence (normalement deja dans l'ordre)
         self.trames_recues.sort(key=lambda x: x[0])
         
@@ -421,45 +188,14 @@ class Recepteur:
         
         return message
     
-    
-    def verifier_message(self, fichier_original):
-        """
-        Compare le message recu avec le fichier original
-        
-        Args:
-            fichier_original: chemin du fichier original
-        
-        Returns:
-            True si identique, False sinon
-        """
-        # Lire le fichier original
-        with open(fichier_original, 'rb') as f:
-            message_original = f.read()
-        
-        # Recomposer le message recu
-        message_recu = self.recomposer_message()
-        
-        # Comparer
-        identique = (message_original == message_recu)
-        
-        print(f"\n{'='*60}")
-        print("VERIFICATION DU MESSAGE")
-        print(f"{'='*60}")
-        print(f"Taille originale : {len(message_original)} octets")
-        print(f"Taille recue     : {len(message_recu)} octets")
-        print(f"Messages identiques : {identique}")
-        print(f"{'='*60}\n")
-        
-        return identique
 
 def simulation_gobackn(fichier_path, probErreur=0.05, probPerte=0.10, delaiMax=0.02,
                        timeout=TIMEOUT, taille_fenetre=5, max_tentatives=5):
-    """
-    Simulation GO-BACK-N (version A améliorée : prise en compte du timeout réel)
-    - Ne modifie pas le Canal.
-    - Introduit un buffer global d'ACKs pour ne pas "perdre" les ACKs arrivant hors timing.
-    - Mesure le temps d'envoi réel (send_times) et déclenche timeout si elapsed > timeout.
-    """
+    # Simulation GO-BACK-N
+    # - Ne modifie pas le Canal.
+    # - Introduit un buffer global d'ACKs pour ne pas "perdre" les ACKs arrivant hors timing.
+    # - Mesure le temps d'envoi réel (send_times) et déclenche timeout si elapsed > timeout.
+
     print("\n" + "="*70)
     print("SIMULATION GO-BACK-N")
     print("="*70)
@@ -488,12 +224,12 @@ def simulation_gobackn(fichier_path, probErreur=0.05, probPerte=0.10, delaiMax=0
     send_times = [None] * nb_trames_total
     temps_debut = time.time()
 
-    # Buffer global pour ACKs reçus (corrige le problème d'ACK "hors timing")
+    # Buffer global pour ACKs reçus
     acks_buffer_global = set()
     
     print("Debut transmission...\n")
 
-    # Retransmettre toutes les trames de la fenêtre à partir de base
+    # Fonction pouyr retransmettre toutes les trames de la fenêtre à partir de base
     def retransmettre_depuis_base():
         print(f"[{get_timestamp()}] 🔁 GO-BACK-N: Retransmission depuis base={base_emetteur} jusqu'à {fin_fenetre - 1}")
         for num_seq in range(base_emetteur, fin_fenetre):
@@ -609,8 +345,6 @@ def simulation_gobackn(fichier_path, probErreur=0.05, probPerte=0.10, delaiMax=0
                 # on n'a pas besoin de la renvoyer sauf si c'est une retransmission explicitement.
                 # Dans cette version minimale, on transmet la trame chaque itération de fenêtre
                 # *si* send_times[num_seq] is None (jamais envoyée) OU si on est en mode retransmission.
-                # Pour rester proche de ton code original : on envoie la trame à chaque itération
-                # (comme tu le faisais), mais on met à jour send_times pour le timer du base.
                 
                 data = trames_data[num_seq]
                 trame = Trame(num_seq, data, TYPE_DATA)
@@ -667,7 +401,7 @@ def simulation_gobackn(fichier_path, probErreur=0.05, probPerte=0.10, delaiMax=0
                     ack_transmis = canal.transmettre(ack_bytes)
                     recepteur.acks_envoyes += 1
                     # petite attente simulée côté récepteur
-                    time.sleep(delaiMax)
+                    time.sleep(0.01)
                     
                     # ============================================================
                     # PHASE 3: EMETTEUR RECOIT (ou pas) L'ACK
@@ -723,7 +457,7 @@ def simulation_gobackn(fichier_path, probErreur=0.05, probPerte=0.10, delaiMax=0
             # On consomme l'ACK et on annule le timer de la trame acquittée (déjà fait plus haut)
             base_emetteur += 1
         
-        # Nettoyer le buffer pour éviter croissance inutile
+        # Nettoyer le buffer
         acks_buffer_global = {a for a in acks_buffer_global if a >= base_emetteur}
         
         if base_emetteur > ancien_base:
@@ -827,9 +561,9 @@ if __name__ == "__main__":
     # print(f"CRC de 'Helo':  {crc2} (0x{crc2:04X})")
     
     # if crc1 != crc2:
-    #     print("✓ CRCs differents pour donnees differentes")
+    #     print(" CRCs differents pour donnees differentes")
     # else:
-    #     print("✗ ERREUR: CRCs identiques!")
+    #     print(" ERREUR: CRCs identiques!")
     
     # # Test verification reste = 0
     # print("\nTest verification 'reste = 0':")
@@ -837,9 +571,9 @@ if __name__ == "__main__":
     # reste = calculer_crc16(trame_test)
     # print(f"Reste pour (data + CRC): {reste}")
     # if reste == 0:
-    #     print("✓ Reste = 0 (verification correcte)")
+    #     print(" Reste = 0 (verification correcte)")
     # else:
-    #     print("✗ ERREUR: Reste != 0")
+    #     print(" ERREUR: Reste != 0")
     
     
     # # ========================================================================
@@ -863,11 +597,11 @@ if __name__ == "__main__":
     #     print(f"Deserialise: num_seq={trame2.num_seq}, data={trame2.data}, CRC valide={crc_ok}")
         
     #     if crc_ok and trame2.data == trame1.data:
-    #         print("✓ Serialisation/Deserialisation correcte")
+    #         print(" Serialisation/Deserialisation correcte")
     #     else:
-    #         print("✗ ERREUR: Donnees ou CRC incorrect")
+    #         print(" ERREUR: Donnees ou CRC incorrect")
     # else:
-    #     print("✗ ERREUR: Deserialisation a echoue")
+    #     print(" ERREUR: Deserialisation a echoue")
     
     # # Test avec un ACK
     # print("\nTest avec ACK:")
@@ -877,9 +611,9 @@ if __name__ == "__main__":
     
     # ack_recu, crc_ok = Trame.deserialiser(ack_bytes)
     # if ack_recu is not None and crc_ok:
-    #     print(f"✓ ACK deserialise: num_seq={ack_recu.num_seq}, type={ack_recu.type_trame}")
+    #     print(f" ACK deserialise: num_seq={ack_recu.num_seq}, type={ack_recu.type_trame}")
     # else:
-    #     print("✗ ERREUR: ACK invalide")
+    #     print(" ERREUR: ACK invalide")
     
     
     # # ========================================================================
@@ -901,48 +635,14 @@ if __name__ == "__main__":
     # # Tester detection
     # trame_test, crc_valide = Trame.deserialiser(trame_corrompue)
     # if not crc_valide:
-    #     print("✓ Erreur detectee par le CRC")
+    #     print(" Erreur detectee par le CRC")
     # else:
-    #     print("✗ ERREUR: Corruption non detectee!")
-    
-    
-    # # ========================================================================
-    # # TEST 4: Canal
-    # # ========================================================================
-    # print("\n>>> TEST 4: Canal de transmission")
-    # print("-" * 70)
-    
-    # canal_test = Canal(probErreur=0.3, probPerte=0.2, delaiMax=0.05)
-    # print("Canal cree avec: erreur=0.3, perte=0.2, delai=50ms")
-    
-    # print("\nEnvoi de 10 trames de test:")
-    # for i in range(10):
-    #     trame = f"Trame_{i}".encode()
-    #     resultat = canal_test.transmettre(trame)
-        
-    #     if resultat is None:
-    #         print(f"  #{i}: PERDUE")
-    #     elif resultat != trame:
-    #         print(f"  #{i}: CORROMPUE")
-    #     else:
-    #         print(f"  #{i}: OK")
-    
-    # stats = canal_test.get_statistiques()
-    # print(f"\nStatistiques:")
-    # print(f"  Transmises: {stats['transmises']}")
-    # print(f"  Perdues:    {stats['perdues']}")
-    # print(f"  Corrompues: {stats['corrompues']}")
-    
-    # if stats['transmises'] > 0 or stats['perdues'] > 0:
-    #     print("✓ Canal fonctionne")
-    # else:
-    #     print("✗ ERREUR: Canal ne transmet rien")
-    
+    #     print(" ERREUR: Corruption non detectee!")
     
     # # ========================================================================
-    # # TEST 5: Emetteur - Segmentation
+    # # TEST 4: Emetteur - Segmentation
     # # ========================================================================
-    # print("\n>>> TEST 5: Segmentation du message")
+    # print("\n>>> TEST 4: Segmentation du message")
     # print("-" * 70)
     
     # canal_seg = Canal(probErreur=0, probPerte=0, delaiMax=0.01)
@@ -961,15 +661,15 @@ if __name__ == "__main__":
     # # Verifier
     # total = sum(len(c) for c in chunks)
     # if total == len(message_test):
-    #     print(f"✓ Segmentation correcte: {total} octets au total")
+    #     print(f" Segmentation correcte: {total} octets au total")
     # else:
-    #     print(f"✗ ERREUR: {total} octets != {len(message_test)}")
+    #     print(f" ERREUR: {total} octets != {len(message_test)}")
     
     
     # # ========================================================================
-    # # TEST 6: Recepteur - Recomposition
+    # # TEST 5: Recepteur - Recomposition
     # # ========================================================================
-    # print("\n>>> TEST 6: Recomposition du message")
+    # print("\n>>> TEST 5: Recomposition du message")
     # print("-" * 70)
     
     # canal_rec = Canal(probErreur=0, probPerte=0, delaiMax=0.01)
@@ -987,15 +687,15 @@ if __name__ == "__main__":
     # print(f"Message recompose: {message_recompose}")
     
     # if message_recompose == b"HelloWorld!":
-    #     print("✓ Recomposition correcte")
+    #     print(" Recomposition correcte")
     # else:
-    #     print("✗ ERREUR: Recomposition incorrecte")
+    #     print(" ERREUR: Recomposition incorrecte")
     
     
     # # ========================================================================
-    # # TEST 7: Transmission simple (3 trames)
+    # # TEST 6: Transmission simple (3 trames)
     # # ========================================================================
-    # print("\n>>> TEST 7: Transmission simple (3 trames)")
+    # print("\n>>> TEST 6: Transmission simple (3 trames)")
     # print("-" * 70)
     
     # canal_simple = Canal(probErreur=0.0, probPerte=0.0, delaiMax=0.05)
@@ -1032,21 +732,15 @@ if __name__ == "__main__":
     # print(f"Message final: {message_final}")
     
     # if message_final == b"AAABBBCCC":
-    #     print("✓ Transmission simple reussie")
+    #     print(" Transmission simple reussie")
     # else:
-    #     print("✗ ERREUR: Message incorrect")
+    #     print(" ERREUR: Message incorrect")
 
-    # --- Test: transmit message.txt from repo root ---
-    # print("\n>>> TEST 8: Transmission du fichier message.txt")
-    # print("-" * 70)
-    # fichier_message = '../message.txt'
-    # result = simulation_gobackn(fichier_message, probErreur=0.0, probPerte=0.0, delaiMax=0.2)
-    # print("\nTest result:", result)
 
     # ========================================================================
-    # TEST 9: Influence du délai sur les temporisations
+    # TEST 7: transmission de "message.txt" + Influence du délai sur les temporisations
     # ========================================================================
-    print("\n>>> TEST 9: Influence du délai sur les temporisations")
+    print("\n>>> TEST 7: Influence du délai sur les temporisations")
     print("-" * 70)
     fichier_message = '../message.txt'
 
